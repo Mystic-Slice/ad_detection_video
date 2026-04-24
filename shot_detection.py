@@ -519,7 +519,8 @@ class TransNetV2Detector(ShotBoundaryDetector):
     """
     name = "TransNet V2"
 
-    def __init__(self):
+    def __init__(self, threshold: float = 0.5):
+        self.threshold = threshold
         self._model = None
         self._torch = None
         self._device = None
@@ -611,7 +612,7 @@ class TransNetV2Detector(ShotBoundaryDetector):
         video_path: Path | str,
         *,
         sample_every: int = 1,
-        threshold: Optional[float] = 0.5,
+        threshold: Optional[float] = None,
         adaptive: bool = False,
         adaptive_k: float = 3.0,
         min_gap_frames: int = 15,
@@ -627,7 +628,7 @@ class TransNetV2Detector(ShotBoundaryDetector):
         if threshold is None and adaptive:
             threshold = float(np.mean(scores) + adaptive_k * np.std(scores))
         elif threshold is None:
-            threshold = 0.5
+            threshold = self.threshold
 
         candidates = np.where(scores > threshold)[0]
 
@@ -795,7 +796,7 @@ class HybridTransNetRandomCLIPDetector(ShotBoundaryDetector):
 
     def __init__(
         self,
-        transnet_threshold: float = 0.5,
+        transnet_threshold: float = 0.95,
         transnet_min_gap: int = 15,
         ad_similarity_threshold: float = 0.6,
         random_samples: int = 100,
@@ -1024,9 +1025,9 @@ ALL_DETECTORS: List[ShotBoundaryDetector] = [
     # Optional -- require extra dependencies, uncomment when you want them:
     # OpticalFlowMagnitudeDetector(),                      # slow, no extra deps
     # CLIPFeatureDetector(),                               # needs open_clip_torch + torch
-    # TransNetV2Detector(),                                # needs transnetv2-pytorch + torch
-    HybridTransNetCLIPDetector(),                        # needs transnetv2-pytorch + open_clip_torch + torch
-    HybridTransNetRandomCLIPDetector(debug=False),                 # needs transnetv2-pytorch + open_clip_torch + torch
+    # TransNetV2Detector(threshold=0.95),                                # needs transnetv2-pytorch + torch
+    HybridTransNetCLIPDetector(transnet_threshold=0.95),                        # needs transnetv2-pytorch + open_clip_torch + torch
+    # HybridTransNetRandomCLIPDetector(transnet_threshold=0.95, debug=False),                 # needs transnetv2-pytorch + open_clip_torch + torch
 ]
 
 
