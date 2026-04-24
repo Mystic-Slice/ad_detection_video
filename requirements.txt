@@ -1,0 +1,11 @@
+numpy
+opencv-python
+matplotlib
+scipy
+jupyter
+
+# Optional -- only needed for the ML-based detectors in shot_detection.py
+torch                 # ~2GB; needed by CLIPFeatureDetector and TransNetV2Detector
+open_clip_torch       # for CLIPFeatureDetector
+Pillow                # for CLIPFeatureDetector (usually pulled in by open_clip_torch)
+transnetv2-pytorch    # for TransNetV2Detector
