@@ -797,12 +797,14 @@ class HybridTransNetRandomCLIPDetector(ShotBoundaryDetector):
         self,
         transnet_threshold: float = 0.5,
         transnet_min_gap: int = 15,
-        ad_similarity_threshold: float = 0.22,
-        random_samples: int = 10,
+        ad_similarity_threshold: float = 0.6,
+        random_samples: int = 100,
         random_seed: Optional[int] = 42,
         clip_model: str = "ViT-B-32",
         clip_pretrained: str = "openai",
         post_offset: int = 10,
+        debug: bool = False,
+        debug_max_candidates: int = 20,
     ):
         self.transnet_threshold = transnet_threshold
         self.transnet_min_gap = transnet_min_gap
@@ -810,10 +812,16 @@ class HybridTransNetRandomCLIPDetector(ShotBoundaryDetector):
         self.random_samples = random_samples
         self.random_seed = random_seed
         self.post_offset = post_offset
+        self.debug = debug
+        self.debug_max_candidates = debug_max_candidates
         self._transnet = TransNetV2Detector()
         self._clip = CLIPFeatureDetector(
             model_name=clip_model, pretrained=clip_pretrained
         )
+
+    def _dbg(self, msg: str) -> None:
+        if self.debug:
+            print(f"[{self.name}] {msg}")
 
     def compute_scores(
         self,
@@ -821,19 +829,23 @@ class HybridTransNetRandomCLIPDetector(ShotBoundaryDetector):
         *,
         sample_every: int = 1,
     ) -> np.ndarray:
-        """Return TransNet per-frame probabilities for plotting compatibility."""
-        return self._transnet.compute_scores(video_path)
+        """Return TransNet probabilities sampled at ``sample_every`` stride."""
+        scores = self._transnet.compute_scores(video_path)
+        stride = max(int(sample_every), 1)
+        return scores[::stride]
 
     def detect(
         self,
         video_path: Path | str,
         *,
-        sample_every: int = 1,          # ignored
+        sample_every: int = 1,
         threshold: Optional[float] = None,   # ignored
         adaptive: bool = False,         # ignored
         adaptive_k: float = 3.0,        # ignored
         min_gap_frames: Optional[int] = None,
     ) -> DetectionResult:
+        stride = max(int(sample_every), 1)
+
         # Stage 1: TransNet candidates
         gap = min_gap_frames if min_gap_frames is not None else self.transnet_min_gap
         tn = self._transnet.detect(
@@ -843,35 +855,63 @@ class HybridTransNetRandomCLIPDetector(ShotBoundaryDetector):
             min_gap_frames=gap,
         )
         candidates = list(tn.detected_frames)
+        sampled_scores = tn.scores[::stride]
+
+        self._dbg(
+            "TransNet stage: "
+            f"threshold={self.transnet_threshold:.3f}, min_gap={gap}, "
+            f"raw_scores={len(tn.scores)}, sampled_scores={len(sampled_scores)}, "
+            f"candidates={len(candidates)}"
+        )
+        if candidates:
+            self._dbg(
+                f"Candidate frame indices (first {min(25, len(candidates))}): "
+                f"{candidates[:25]}"
+            )
 
         if not candidates:
+            self._dbg("No TransNet candidates found; returning empty detection list.")
             return DetectionResult(
                 method_name=self.name,
-                scores=tn.scores,
+                scores=sampled_scores,
                 detected_frames=[],
                 threshold=self.ad_similarity_threshold,
-                sample_every=1,
+                sample_every=stride,
             )
 
         cap = cv2.VideoCapture(str(video_path))
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        self._dbg(f"Video frame_count={total}, sample_every={stride}, post_offset={self.post_offset}")
         if total <= 0:
             cap.release()
+            print(f"Warning: video has no frames: {video_path}")
             return DetectionResult(
                 method_name=self.name,
-                scores=tn.scores,
+                scores=sampled_scores,
                 detected_frames=[],
                 threshold=self.ad_similarity_threshold,
-                sample_every=1,
+                sample_every=stride,
             )
 
         # Stage 2: sample random reference frames from the whole video
         n_refs = max(1, min(self.random_samples, total))
         rng = np.random.default_rng(self.random_seed)
         ref_indices = np.sort(rng.choice(total, size=n_refs, replace=False)).tolist()
+        self._dbg(
+            f"Reference sampling: requested={self.random_samples}, used={n_refs}, "
+            f"seed={self.random_seed}"
+        )
+        self._dbg(
+            f"Reference frame indices (first {min(25, len(ref_indices))}): "
+            f"{ref_indices[:25]}"
+        )
 
         # Candidate frames are sampled just after each TransNet boundary.
         cand_targets = [min(c + self.post_offset, max(total - 1, 0)) for c in candidates]
+        self._dbg(
+            f"Candidate target frames (first {min(25, len(cand_targets))}): "
+            f"{cand_targets[:25]}"
+        )
 
         # Read all needed frames with one pass over unique indices.
         needed = sorted(set(ref_indices + cand_targets))
@@ -882,15 +922,18 @@ class HybridTransNetRandomCLIPDetector(ShotBoundaryDetector):
             if ret:
                 index_to_rgb[idx] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         cap.release()
+        self._dbg(f"Frame fetch: requested_unique={len(needed)}, read_ok={len(index_to_rgb)}")
 
         ref_frames = [index_to_rgb[i] for i in ref_indices if i in index_to_rgb]
+        self._dbg(f"Reference frames available={len(ref_frames)}")
         if not ref_frames:
+            print(f"Warning: no reference frames could be read from video: {video_path}")
             return DetectionResult(
                 method_name=self.name,
-                scores=tn.scores,
+                scores=sampled_scores,
                 detected_frames=[],
                 threshold=self.ad_similarity_threshold,
-                sample_every=1,
+                sample_every=stride,
             )
 
         cand_frames: List[np.ndarray] = []
@@ -901,13 +944,23 @@ class HybridTransNetRandomCLIPDetector(ShotBoundaryDetector):
                 cand_frames.append(f)
                 valid_candidates.append(c)
 
+        self._dbg(
+            f"Candidate frames available={len(cand_frames)} / {len(candidates)}"
+        )
+        if valid_candidates:
+            self._dbg(
+                f"Valid candidate frames (first {min(25, len(valid_candidates))}): "
+                f"{valid_candidates[:25]}"
+            )
+
         if not cand_frames:
+            print(f"Warning: no candidate frames could be read from video: {video_path}")
             return DetectionResult(
                 method_name=self.name,
-                scores=tn.scores,
+                scores=sampled_scores,
                 detected_frames=[],
                 threshold=self.ad_similarity_threshold,
-                sample_every=1,
+                sample_every=stride,
             )
 
         # Stage 3: CLIP embeddings and average similarity filtering
@@ -915,19 +968,47 @@ class HybridTransNetRandomCLIPDetector(ShotBoundaryDetector):
         ref_feats = feats[:len(ref_frames)]
         cand_feats = feats[len(ref_frames):]
 
+        self._dbg(
+            f"Embedding shapes: all={feats.shape}, refs={ref_feats.shape}, "
+            f"cands={cand_feats.shape}"
+        )
+
         kept: List[int] = []
-        for c, f in zip(valid_candidates, cand_feats):
+        mean_sims: List[float] = []
+        for idx, (c, f) in enumerate(zip(valid_candidates, cand_feats)):
             sims = ref_feats @ f
             mean_sim = float(np.mean(sims))
+            mean_sims.append(mean_sim)
+            if self.debug and idx < max(self.debug_max_candidates, 1):
+                self._dbg(
+                    f"Candidate {c}: mean_sim={mean_sim:.4f}, "
+                    f"min_sim={float(np.min(sims)):.4f}, max_sim={float(np.max(sims)):.4f}, "
+                    f"threshold={self.ad_similarity_threshold:.4f}, "
+                    f"keep={mean_sim < self.ad_similarity_threshold}"
+                )
             if mean_sim < self.ad_similarity_threshold:
                 kept.append(c)
 
+        if mean_sims:
+            ms = np.array(mean_sims, dtype=np.float64)
+            self._dbg(
+                "Similarity summary: "
+                f"mean={float(ms.mean()):.4f}, std={float(ms.std()):.4f}, "
+                f"min={float(ms.min()):.4f}, p25={float(np.percentile(ms, 25)):.4f}, "
+                f"p50={float(np.percentile(ms, 50)):.4f}, p75={float(np.percentile(ms, 75)):.4f}, "
+                f"max={float(ms.max()):.4f}"
+            )
+        self._dbg(
+            f"Final kept={len(kept)} / {len(valid_candidates)} candidates. "
+            f"Ad similarity threshold={self.ad_similarity_threshold:.4f}"
+        )
+
         return DetectionResult(
             method_name=self.name,
-            scores=tn.scores,
+            scores=sampled_scores,
             detected_frames=kept,
             threshold=self.ad_similarity_threshold,
-            sample_every=1,
+            sample_every=stride,
         )
 
 
@@ -944,8 +1025,8 @@ ALL_DETECTORS: List[ShotBoundaryDetector] = [
     # OpticalFlowMagnitudeDetector(),                      # slow, no extra deps
     # CLIPFeatureDetector(),                               # needs open_clip_torch + torch
     # TransNetV2Detector(),                                # needs transnetv2-pytorch + torch
-    # HybridTransNetCLIPDetector(),                        # needs transnetv2-pytorch + open_clip_torch + torch
-    HybridTransNetRandomCLIPDetector(),                 # needs transnetv2-pytorch + open_clip_torch + torch
+    HybridTransNetCLIPDetector(),                        # needs transnetv2-pytorch + open_clip_torch + torch
+    HybridTransNetRandomCLIPDetector(debug=False),                 # needs transnetv2-pytorch + open_clip_torch + torch
 ]
 
 
