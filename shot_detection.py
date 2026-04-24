@@ -944,8 +944,8 @@ ALL_DETECTORS: List[ShotBoundaryDetector] = [
     # OpticalFlowMagnitudeDetector(),                      # slow, no extra deps
     # CLIPFeatureDetector(),                               # needs open_clip_torch + torch
     # TransNetV2Detector(),                                # needs transnetv2-pytorch + torch
-    HybridTransNetCLIPDetector(),                        # needs transnetv2-pytorch + open_clip_torch + torch
-    # HybridTransNetRandomCLIPDetector(),                 # needs transnetv2-pytorch + open_clip_torch + torch
+    # HybridTransNetCLIPDetector(),                        # needs transnetv2-pytorch + open_clip_torch + torch
+    HybridTransNetRandomCLIPDetector(),                 # needs transnetv2-pytorch + open_clip_torch + torch
 ]
 
 
